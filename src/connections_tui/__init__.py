@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Terminal Connections (NYT) — no external deps, Python 3.10+
-# Keys: arrows/WASD move • Space select • Enter submit • f shuffle • c clear • q quit
+# Keys: arrows/WASD move • Space select • Enter submit • f shuffle • c clear • y copy • q quit
 
 from __future__ import annotations
 
 import argparse
+import base64
 import curses
 import json
 import random
@@ -25,6 +26,8 @@ EASIEST_TO_HARDEST_COLORS = [
     curses.COLOR_CYAN,
     curses.COLOR_MAGENTA,
 ]
+SHARE_EMOJI = ("🟨", "🟩", "🟦", "🟪")
+
 
 
 @dataclass
@@ -42,6 +45,8 @@ class GameState:
     date_str: str
     groups: List[Group]
     remaining_words: List[str]  # words not yet solved, in board order
+    puzzle_id: int | None = None
+    guess_history: List[Tuple[int, int, int, int]] = field(default_factory=list)
     solved: List[Tuple[str, List[str], int]] = field(
         default_factory=list
     )  # (title, words, difficulty)
@@ -87,12 +92,11 @@ def load_puzzle_from_json(obj: dict) -> List[Group]:
     return groups
 
 
-def fetch_nyt_puzzle(date_str: str) -> List[Group]:
+def fetch_nyt_puzzle(date_str: str) -> dict:
     url = NYT_URL_TEMPLATE.format(date=date_str)
     try:
         with urllib.request.urlopen(url, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        return load_puzzle_from_json(data)
+            return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # Helpful hint if timezone/date mismatch
         if e.code == 404:
@@ -140,12 +144,42 @@ def make_initial_board(groups: List[Group]) -> List[str]:
         return words
 
 
+def format_share_result(state: GameState) -> str:
+    """Format submitted guesses in the same shareable form as NYT Connections."""
+    header = ["Connections"]
+    if state.puzzle_id is not None:
+        header.append(f"Puzzle #{state.puzzle_id}")
+    else:
+        header.append(state.date_str)
+
+    rows = [
+        "".join(SHARE_EMOJI[difficulty] for difficulty in guess)
+        for guess in state.guess_history
+    ]
+    return "\n".join(header + rows)
+
+
+def copy_to_clipboard(text: str) -> None:
+    """Copy text through the terminal so it also works across SSH."""
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    with open("/dev/tty", "w", encoding="utf-8") as terminal:
+        terminal.write(f"\033]52;c;{encoded}\a")
+        terminal.flush()
+
+
 def submit_selection(state: GameState) -> Tuple[bool, str]:
     """Return (did_match_group, message). Implements 'one away' logic and strikes."""
     if len(state.selection_idx) != 4:
         return False, "Select exactly 4 words."
 
-    chosen = {state.remaining_words[i] for i in state.selection_idx}
+    chosen_words = [state.remaining_words[i] for i in sorted(state.selection_idx)]
+    chosen = set(chosen_words)
+    state.guess_history.append(
+        tuple(
+            next(int(group.difficulty or 0) for group in state.groups if word in group.words)
+            for word in chosen_words
+        )
+    )
     # Check exact match
     for g in state.groups:
         if g.words.issubset(set(state.remaining_words)) and chosen == g.words:
@@ -179,6 +213,21 @@ def submit_selection(state: GameState) -> Tuple[bool, str]:
 
 def all_groups_solved(state: GameState) -> bool:
     return len(state.remaining_words) == 0
+
+
+def game_finished(state: GameState) -> bool:
+    return all_groups_solved(state) or state.strikes >= state.max_strikes
+
+
+def draw_game_status(stdscr, state: GameState, height: int) -> None:
+    if state.strikes >= state.max_strikes:
+        message = "💥 Out of mistakes! Press y=copy, c=reveal, q=quit."
+    elif all_groups_solved(state):
+        result = "Perfect" if state.strikes == 0 else "Solved"
+        message = f"🎉 {result}! Press y=copy, n=next, p=prev, q=quit."
+    else:
+        return
+    draw_centered(stdscr, height - 4, message)
 
 
 def draw_centered(stdscr, y: int, text: str, attr=0):
@@ -244,7 +293,9 @@ def redraw_board_area(stdscr, state: GameState, board_start_y: int, w: int):
 
     if total_tiles == 0:
         draw_centered(
-            stdscr, board_start_y, "🎉 All groups solved! Press n=next, p=prev, q=quit."
+            stdscr,
+            board_start_y,
+            "🎉 All groups solved! Press y=copy, n=next, p=prev, q=quit.",
         )
         return
 
@@ -292,10 +343,13 @@ def load_day_into_state(state: GameState, day_offset: int):
     d0 = datetime.strptime(state.date_str, "%Y-%m-%d").date()
     d = d0 + timedelta(days=day_offset)
     date_str = d.strftime("%Y-%m-%d")
-    groups = fetch_nyt_puzzle(date_str)
+    data = fetch_nyt_puzzle(date_str)
+    groups = load_puzzle_from_json(data)
     state.date_str = date_str
+    state.puzzle_id = data.get("id")
     state.groups = groups
     state.remaining_words = make_initial_board(groups)
+    state.guess_history.clear()
     state.solved.clear()
     state.selection_idx.clear()
     state.strikes = 0
@@ -382,13 +436,7 @@ def main_loop(stdscr, state: GameState, use_ascii: bool = False):
             draw_centered(stdscr, h - 3, state.one_away_msg)
         draw_centered(stdscr, h - 2, msg)
 
-        if state.strikes >= state.max_strikes:
-            draw_centered(
-                stdscr, h - 4, "💥 Out of mistakes! Press q to quit or c to reveal."
-            )
-
-        if all_groups_solved(state):
-            draw_centered(stdscr, h - 4, "🎉 Perfect! Press n=next, p=prev, q=quit.")
+        draw_game_status(stdscr, state, h)
 
         stdscr.refresh()
 
@@ -396,6 +444,13 @@ def main_loop(stdscr, state: GameState, use_ascii: bool = False):
         ch = stdscr.getch()
         if ch in (ord("q"), ord("Q")):
             break
+        elif ch in (ord("y"), ord("Y")):
+            if game_finished(state):
+                try:
+                    copy_to_clipboard(format_share_result(state))
+                    state.one_away_msg = "Score copied to clipboard."
+                except OSError as e:
+                    state.one_away_msg = f"Couldn't copy score: {e}"
         elif ch in (curses.KEY_LEFT, ord("a"), ord("A"), ord("h")):
             if total_tiles:
                 cursor = (cursor - 1) % total_tiles
@@ -486,14 +541,7 @@ def main_loop(stdscr, state: GameState, use_ascii: bool = False):
             if state.one_away_msg:
                 draw_centered(stdscr, h - 3, state.one_away_msg)
             draw_centered(stdscr, h - 2, msg)
-            if state.strikes >= state.max_strikes:
-                draw_centered(
-                    stdscr, h - 4, "💥 Out of mistakes! Press q to quit or c to reveal."
-                )
-            if all_groups_solved(state):
-                draw_centered(
-                    stdscr, h - 4, "🎉 Perfect! Press n=next, p=prev, q=quit."
-                )
+            draw_game_status(stdscr, state, h)
             stdscr.refresh()
 
 
@@ -536,12 +584,17 @@ def main():
 
     if args.file:
         data = json.loads(Path(args.file).read_text("utf-8"))
-        groups = load_puzzle_from_json(data)
     else:
-        groups = fetch_nyt_puzzle(date_str)
+        data = fetch_nyt_puzzle(date_str)
 
+    groups = load_puzzle_from_json(data)
     board = make_initial_board(groups)
-    state = GameState(date_str=date_str, groups=groups, remaining_words=board)
+    state = GameState(
+        date_str=date_str,
+        puzzle_id=data.get("id"),
+        groups=groups,
+        remaining_words=board,
+    )
     run_curses(state, use_ascii=args.ascii)
 
 

@@ -31,6 +31,7 @@ Use arrows/WASD to navigate, [Space]=Select, [Enter]=Submit, f=shuffle, c=clear,
 - Shuffle, select, and submit words.
 - Strike tracking with hearts (`❤`) or ASCII (`O`/`x`) for compatibility.
 - "One away" hints when you're close.
+- Copy a browser-compatible score after finishing a puzzle.
 - After solving, you can immediately load the next or previous day's puzzle.
 - Load puzzles from local JSON files for offline play or custom games.
 - Set a random seed for reproducible shuffles.
@@ -41,6 +42,12 @@ Arguably the simplest way to run the project is with `uv`:
 
 ```bash
 uvx connections-tui@latest
+```
+
+To run this fork's score-copy branch directly:
+
+```bash
+uvx --from git+https://github.com/drewwyatt/connections-tui@dw/copy-score connections-tui
 ```
 
 You can of course install directly from PyPI:
@@ -79,6 +86,7 @@ connections-tui -d $(date -v-1d +%Y-%m-%d) --ascii
 | `Enter` | Submit your selection of 4 words |
 | `f` | Shuffle the remaining words on the board |
 | `c` | Clear your current selection |
+| `y` | (After finishing) Copy the browser-compatible score |
 | `q` | Quit the game |
 | `n` | (After solving) Load the next day's puzzle |
 | `p` | (After solving) Load the previous day's puzzle |
